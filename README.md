@@ -15,7 +15,9 @@ Status: **writes guessed hot cues for you to review** (2026-11-14).
    **blue** (`0x0044FF`) and labelled `guess`, and the track goes into the crate **Cues: review**.
    A track that has any hot cues is never written to, nor is one whose file changed since the
    guess.
-3. Check the cues in Mixxx and fix any that are wrong. Then **remove the track from Cues:
+   On tracks in Cues: review it also sets Mixxx's **intro end** and **outro start**, where you
+   haven't set them (see "Intro and outro" below).
+3. Check the cues (and intro/outro) in Mixxx and fix any that are wrong. Then **remove the track from Cues:
    review**: that's the approval. At the next launch the mod turns its `guess` cues orange
    (`0xFF8000`, your usual color) and clears the label, so blue on a deck always means "not
    checked yet".
@@ -54,6 +56,24 @@ a bar. A trained model has to beat these numbers to be worth building.
 
 Audio goes through libsndfile (WAV, FLAC, MP3, OGG). Other formats, such as M4A, are skipped
 and counted.
+
+## Intro and outro
+
+`uv run python -m mixxx_cue_guess.markers` scores it. On marked tracks you set the intro end and
+outro start almost always (418 and 411 of 438, 2026-11-14), on 8-bar steps from your cues: the
+intro end on your first hot cue or 8-24 bars before it, the outro start 8-48 bars after your
+last. So the candidates are those steps from the guessed first and last cue, and a
+gradient-boosting model (the drop ranker's per-beat features, plus how many phrases away)
+picks one of each. Scored 3x5-fold by track (about 380 tracks, 2026-11-14), within a beat:
+intro end 50%, outro start 47% from guessed cues; 66% and 63% from your real cues, against 34%
+and 32% for a fixed rule (8 bars before the first cue, 16 after the last). The mod writes them only where the marker isn't set, only on tracks in
+Cues: review, and never changes one you set (mixxx-harness refuses it).
+
+Mixxx's rows, worked out from the library (not in cratesync's findings): intro type 6, start
+`position`, end `position + length` (length 0 = no end); outro type 7, `position` -1 with the
+end in `length` when no start is set, else start `position`, end `position + length`.
+**Not checked yet: that Mixxx shows markers written this way.** Look at one track in Mixxx
+after the first launch that writes them.
 
 ## Trained ranker
 

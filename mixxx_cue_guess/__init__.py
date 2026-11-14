@@ -6,6 +6,7 @@
 2. At each harness launch (Mixxx closed), this mod writes those guesses as hot cues, colored
    GUESS_COLOR and labelled GUESS_LABEL, and adds each track to REVIEW_CRATE. cratesync doesn't
    count a track in that crate as marked.
+   It also sets the intro end and outro start where those aren't set yet, on tracks in REVIEW_CRATE.
 3. You check the cues in Mixxx, fix any that are wrong, and remove the track from REVIEW_CRATE.
    That is the approval. At the next launch the mod turns that track's guessed cues
    APPROVED_COLOR and clears their label, so the guess color always means "not checked yet".
@@ -60,6 +61,27 @@ def writable(con, guesses: dict, written: set[int]) -> list[tuple[int, list[tupl
     return out
 
 
+def marker_writes(con, guesses: dict, tracks: set[int]) -> list[tuple[int, str, float]]:
+    """(track id, "intro" or "outro", position) for each guessed intro end and outro start the mod
+    would write now: on `tracks` only, at the guessed file, and only where that marker isn't set.
+    Layout: mixxx_cue_guess.markers."""
+    out = []
+    for key, g in guesses.items():
+        tid = int(key)
+        if tid not in tracks or db.track_path(con, tid) != g["path"]:
+            continue
+        rate, channels = db.audio_format(con, tid)
+        if not (rate and channels):
+            continue
+        intro = con.execute("SELECT position, length FROM cues WHERE track_id = ? AND type = 6", (tid,)).fetchall()
+        outro = con.execute("SELECT position, length FROM cues WHERE track_id = ? AND type = 7", (tid,)).fetchall()
+        if g.get("intro") is not None and len(intro) == 1 and intro[0][1] == 0 and 0 <= intro[0][0] < g["intro"] * rate * channels:
+            out.append((tid, "intro", g["intro"] * rate * channels))
+        if g.get("outro") is not None and len(outro) == 1 and outro[0][0] == -1 and 0 <= g["outro"] * rate * channels < outro[0][1]:
+            out.append((tid, "outro", g["outro"] * rate * channels))
+    return out
+
+
 def status(con, folder: Path) -> dict:
     """Where every track stands, for the dashboard page. Reads only."""
     guesses = read_json(folder / "guesses.json", {})
@@ -96,7 +118,8 @@ class CueGuess:
         approved = [cue for cue, tid in con.execute(
             "SELECT id, track_id FROM cues WHERE hotcue >= 0 AND label = ?", (GUESS_LABEL,)) if tid not in review]
         new = writable(con, guesses, written)
-        if not approved and not new:
+        markers = marker_writes(con, guesses, review | {tid for tid, _ in new})  # never on a track you approved
+        if not approved and not new and not markers:
             return
         with ctx.write():
             for cue in approved:
@@ -104,6 +127,8 @@ class CueGuess:
             for tid, cues in new:
                 ctx.add_hot_cues(tid, cues)
                 ctx.add_to_crate(REVIEW_CRATE, tid)
+            for tid, kind, pos in markers:
+                (ctx.set_intro_end if kind == "intro" else ctx.set_outro_start)(tid, pos)
         if not ctx.dry_run:
             write_json(folder / "written.json", sorted(written | {tid for tid, _ in new}))
 

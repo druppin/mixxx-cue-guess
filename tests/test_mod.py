@@ -87,6 +87,39 @@ class Mod(unittest.TestCase):
         self.assertEqual((st["in review"], st["approved, not recolored yet"], st["done (left the crate)"]), (0, 1, 1))
         self.assertEqual(st["need analysis in Mixxx first"], 1)  # track 3: no cues, no BPM in the test db
 
+    def markers(self, tid):
+        q = "SELECT type, position, length FROM cues WHERE track_id = ? AND type IN (6, 7) ORDER BY type"
+        return [tuple(r) for r in db.connect(self.db).execute(q, (tid,))]
+
+    def test_intro_and_outro_only_where_unset_and_only_in_review(self):
+        s, end = RATE * CH, 100.0 * RATE * CH
+        con = sqlite3.connect(self.db)
+        for tid, intro_len, outro_pos in ((1, 700, 50 * s), (2, 0, -1)):  # track 1: yours; track 2: unset
+            con.execute("INSERT INTO cues (track_id, type, position, length, hotcue) VALUES (?, 6, 1000, ?, -1)", (tid, intro_len))
+            con.execute("INSERT INTO cues (track_id, type, position, length, hotcue) VALUES (?, 7, ?, ?, -1)",
+                        (tid, outro_pos, end if outro_pos == -1 else end - outro_pos))
+        con.commit()
+        con.close()
+        data = json.loads((self.state / "guesses.json").read_text())
+        for t in ("1", "2"):
+            data[t].update({"intro": 5.0, "outro": 80.0})
+        (self.state / "guesses.json").write_text(json.dumps(data))
+        mine = self.markers(1)
+        done, warnings = self.run_mod()
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.markers(2), [(6, 1000, 5 * s - 1000), (7, 80 * s, end - 80 * s)])
+        self.assertEqual(self.markers(1), mine)  # yours: untouched
+
+        con = sqlite3.connect(self.db)  # a track you approved before its markers were guessed: left alone
+        con.execute("UPDATE cues SET length = 0 WHERE track_id = 2 AND type = 6")
+        con.commit()
+        con.close()
+        c = db.connect(self.db, write=True)
+        db.remove_from_crate(c, REVIEW_CRATE, 2)
+        c.commit()
+        self.run_mod()
+        self.assertEqual(self.markers(2)[0], (6, 1000, 0))
+
     def test_dry_run_writes_nothing(self):
         before = self.db.read_bytes()
         done, warnings = self.run_mod(dry_run=True)
@@ -110,6 +143,10 @@ class GuessCommand(unittest.TestCase):
         con.execute("UPDATE library SET bpm = ?, samplerate = ?, channels = 2", (BPM, SR))
         for h, t in enumerate([bar(8), bar(16), bar(32), bar(40)]):  # the synth's one rise is at bar 16
             con.execute("UPDATE cues SET position = ? WHERE track_id < 4 AND hotcue = ?", (t * SR * 2, h))
+        for tid in (1, 2, 3):  # your intro ends on your first cue; your outro starts 8 bars after your last
+            con.execute("INSERT INTO cues (track_id, type, position, length, hotcue) VALUES (?, 6, 0, ?, -1)", (tid, bar(8) * SR * 2))
+            con.execute("INSERT INTO cues (track_id, type, position, length, hotcue) VALUES (?, 7, ?, ?, -1)",
+                        (tid, bar(48) * SR * 2, (bar(64) - bar(48)) * SR * 2))
         con.commit()
         con.close()
         cfg = mock.Mock(mixxx_db=tmp / "not-this.sqlite")
@@ -123,6 +160,8 @@ class GuessCommand(unittest.TestCase):
         self.assertEqual(len(seconds), 4)
         self.assertEqual(seconds, sorted(seconds))
         self.assertTrue(any(abs(s - bar(16)) < 60 / BPM for s in seconds))
+        self.assertLessEqual(out["4"]["intro"], seconds[0] + 60 / BPM)  # at or before the first cue
+        self.assertGreater(out["4"]["outro"], seconds[-1])  # after the last
 
     def test_refuses_the_live_db(self):
         cfg = mock.Mock(mixxx_db=Path("/tmp/live.sqlite"))

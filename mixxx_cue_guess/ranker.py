@@ -105,12 +105,10 @@ def spectral(mel: np.ndarray, chroma: np.ndarray, idx: np.ndarray) -> np.ndarray
     return np.array(rows).reshape(len(idx), -1)
 
 
-def candidates(total, bass, fps: float, bpm: float, mel: np.ndarray, chroma: np.ndarray):
-    """Beat frames, candidate beat indices, and one feature row per candidate.
-
-    Candidates: the peaks of the 1-bar rise, plus every 8-bar phrase start. The phrase phase is the
-    one where the 1-bar change adds up highest (right within a beat on 79% of tracks, 2026-11-13).
-    """
+def analysis(total, bass, fps: float, bpm: float, mel: np.ndarray, chroma: np.ndarray) -> dict:
+    """Everything per beat that features() reads: the beat grid, rises, change, 1-bar peaks, the
+    phrase phase (where the 1-bar change adds up highest: right within a beat on 79% of
+    tracks, 2026-11-13) and the mel spectrum and chroma averaged over each beat."""
     period = fps * 60 / bpm
     beats = b.beat_frames(bass, period)
     width = int(round(period * b.PHRASE))
@@ -118,24 +116,46 @@ def candidates(total, bass, fps: float, bpm: float, mel: np.ndarray, chroma: np.
     short = b.rise(total, bass, beats, int(round(period * 4)))
     ch = np.nan_to_num(b.change(total, bass, beats, int(round(period * 4))))
     ok = np.flatnonzero(np.isfinite(long) & np.isfinite(short))
-    peaks = [i for i in ok if b.sharpen(short, i) == i]
-    phase = max(range(b.PHRASE), key=lambda p: ch[p::b.PHRASE].sum())
-    idx = np.array(sorted(set(peaks) | {i for i in ok if i % b.PHRASE == phase}), dtype=int)
-    if not len(idx):
-        return beats, idx, np.zeros((0, len(FEATURES)))
+    return {"beats": beats, "fps": fps, "width": width, "long": long, "short": short, "ch": ch, "ok": ok,
+            "peaks": [i for i in ok if b.sharpen(short, i) == i], "total": total, "bass": bass,
+            "phase": max(range(b.PHRASE), key=lambda p: ch[p::b.PHRASE].sum()),
+            "mel": per_beat(mel, beats), "chroma": per_beat(chroma, beats)}
+
+
+def features(A: dict, idx: np.ndarray) -> np.ndarray:
+    """One row of FEATURES per beat index; NaN where a window runs past the track's edge."""
+    beats, width, long, short, ch, phase, total, bass = (A[k] for k in ("beats", "width", "long", "short", "ch", "phase", "total", "bass"))
+    fin = long[idx][np.isfinite(long[idx])]  # the biggest among these beats, as the drop ranker was trained
+    top = fin.max() if len(fin) else 1.0
     after = lambda v: b.window_mean(v, beats[idx], beats[idx] + width) - np.median(v)  # noqa: E731
     before = lambda v: b.window_mean(v, beats[idx] - width, beats[idx]) - np.median(v)  # noqa: E731
     off = (idx - phase) % b.PHRASE
     away = [idx + k for k in (-128, -96, -64, 64, 96, 128)]  # 16, 24, 32 bars: where the other drop tends to be
     partner = np.max([np.where((j >= 0) & (j < len(long)), np.nan_to_num(long[j.clip(0, len(long) - 1)], neginf=-5), 0)
                       for j in away], axis=0)
-    spec = spectral(per_beat(mel, beats), per_beat(chroma, beats), idx)
-    X = np.column_stack([long[idx], short[idx], long[idx] / max(long[idx].max(), b.EPS), idx / len(beats),
-                         idx / 4 / 100, after(total), after(bass), before(total), 1 - np.minimum(off, b.PHRASE - off) / 16,
-                         np.argsort(np.argsort(-long[idx])) / len(idx), np.isin(idx, peaks), partner, before(bass),
-                         np.minimum(idx % b.PHRASE, b.PHRASE - idx % b.PHRASE), ch[idx], spec])
+    lo, sh = np.where(np.isfinite(long[idx]), long[idx], np.nan), np.where(np.isfinite(short[idx]), short[idx], np.nan)
+    rank = np.argsort(np.argsort(-np.nan_to_num(lo, nan=-np.inf))) / max(len(idx), 1)
+    return np.column_stack([lo, sh, lo / max(top, b.EPS), idx / len(beats), idx / 4 / 100, after(total), after(bass),
+                            before(total), 1 - np.minimum(off, b.PHRASE - off) / 16, rank, np.isin(idx, A["peaks"]),
+                            partner, before(bass), np.minimum(idx % b.PHRASE, b.PHRASE - idx % b.PHRASE), ch[idx],
+                            spectral(A["mel"], A["chroma"], idx)])
+
+
+def candidates(total, bass, fps: float, bpm: float, mel: np.ndarray, chroma: np.ndarray):
+    """Beat frames, drop candidate beat indices, and one feature row per candidate.
+
+    Candidates: the peaks of the 1-bar rise, plus every 8-bar phrase start.
+    """
+    return drop_candidates(analysis(total, bass, fps, bpm, mel, chroma))
+
+
+def drop_candidates(A: dict):
+    idx = np.array(sorted(set(A["peaks"]) | {i for i in A["ok"] if i % b.PHRASE == A["phase"]}), dtype=int)
+    if not len(idx):
+        return A["beats"], idx, np.zeros((0, len(FEATURES)))
+    X = features(A, idx)
     ok = np.isfinite(X).all(axis=1)  # windows past the track's end
-    return beats, idx[ok], X[ok]
+    return A["beats"], idx[ok], X[ok]
 
 
 def drop_cues(cues, beat: float) -> list[float]:
