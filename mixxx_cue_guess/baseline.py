@@ -9,7 +9,9 @@ For each marked track (4+ hot cues) with a BPM in Mixxx:
 1. Beat grid: Mixxx's BPM, with the phase found from the kick drum's onsets.
 2. Phrase grid: every 8 bars (32 beats), at the offset where the track changes most.
 3. Change at a point: how much the loudness and the bass differ, 8 bars before vs. after.
-4. Rules: "top 4" (the 4 biggest changes) and "start + top 3" (first beat, then the 3 biggest).
+4. Rules: "top 4" (the 4 biggest changes), "start + top 3" (first beat, then the 3 biggest),
+   and "2 drops" (the 2 biggest rises in loudness and bass, each with a cue 8 bars before it:
+   the pattern in the first run, 2026-11-13, where 17 of 19 tracks had cues A, A+8 bars, B, B+8 bars).
 It then counts how many of your cues a guess lands near, and how many of your cues sit
 on the beat grid and on the phrase grid at all (if those are low, a better picker can't help).
 """
@@ -29,7 +31,8 @@ HOP = 512  # samples per analysis frame
 PHRASE = 32  # beats: 8 bars of 4/4
 BASS_HZ = 150
 EPS = 1e-10
-RULES = ("top 4", "start + top 3")
+RULES = ("top 4", "start + top 3", "2 drops")
+ON_BEAT = 0.1  # of a beat: how close a cue must be to count as on the grid (~45 ms at 130 BPM)
 
 
 def marked_tracks(con) -> list[dict]:
@@ -85,6 +88,25 @@ def change(total: np.ndarray, bass: np.ndarray, beats: np.ndarray, width: int) -
     return out
 
 
+def rise(total: np.ndarray, bass: np.ndarray, beats: np.ndarray, width: int) -> np.ndarray:
+    """At each beat: after - before, like change() but signed, so a drop scores high and an outro low."""
+    out = np.zeros(len(beats))
+    for v in (total, bass):
+        out += np.nan_to_num(window_mean(v, beats, beats + width) - window_mean(v, beats - width, beats))
+    return out
+
+
+def drops(r: np.ndarray, n: int = 2, apart: int = 2 * PHRASE) -> list[int]:
+    """The n beats with the biggest rise, at least `apart` beats from each other."""
+    picked = []
+    for i in np.argsort(-r, kind="stable"):
+        if all(abs(int(i) - p) >= apart for p in picked):
+            picked.append(int(i))
+            if len(picked) == n:
+                break
+    return picked
+
+
 def guess(total, bass, fps: float, bpm: float) -> dict:
     period = fps * 60 / bpm
     beats = beat_frames(bass, period)
@@ -93,11 +115,13 @@ def guess(total, bass, fps: float, bpm: float) -> dict:
     phrase = np.arange(offset, len(beats), PHRASE)
     top = phrase[np.argsort(-score[phrase], kind="stable")]
     seconds = lambda idx: sorted(float(beats[i] / fps) for i in idx)  # noqa: E731
+    found = drops(rise(total, bass, beats, int(round(period * PHRASE))))
     return {
         "beats": beats / fps,
         "phrase": beats[phrase] / fps,
         "top 4": seconds(top[:4]),
         "start + top 3": seconds([0] + [i for i in top if i != 0][:3]),
+        "2 drops": seconds(found + [max(d - PHRASE, 0) for d in found]),
     }
 
 
@@ -131,7 +155,7 @@ def analyze(track: dict) -> dict:
         return {"skip": f"can't decode ({Path(track['path']).suffix or 'no extension'})", "error": str(e)}
     g = guess(total, bass, fps, track["bpm"])
     beat, cues = 60 / track["bpm"], track["cues"]
-    out = {"cues": len(cues), "on beat grid": near(g["beats"], cues, beat / 2),
+    out = {"cues": len(cues), "on beat grid": near(g["beats"], cues, beat * ON_BEAT),
            "on phrase grid": near(g["phrase"], cues, beat)}
     for rule in RULES:
         out[rule] = {"beat": matched(g[rule], cues, beat), "bar": matched(g[rule], cues, 4 * beat), "guesses": g[rule]}
@@ -178,14 +202,14 @@ def main(argv=None) -> int:
                 print(f"  {t['id']:>5} {name}: skipped, {r['skip']} {r.get('error', '')}")
             else:
                 cues = " ".join(f"{c:.1f}" for c in t["cues"])
-                best = " ".join(f"{c:.1f}" for c in r["start + top 3"]["guesses"])
-                print(f"  {t['id']:>5} {name}: yours {cues} | guessed {best} | {r['start + top 3']['beat']}/{r['cues']} within a beat")
+                best = " ".join(f"{c:.1f}" for c in r[RULES[-1]]["guesses"])
+                print(f"  {t['id']:>5} {name}: yours {cues} | {RULES[-1]} {best} | {r[RULES[-1]]['beat']}/{r['cues']} within a beat")
     print(f"Analyzed {len(done)}, skipped {sum(skips.values())}" + "".join(f"\n  {n} {why}" for why, n in skips.most_common()))
     if not done:
         return 1
     cues = sum(r["cues"] for _, r in done)
     print(f"\nYour {cues} hot cues on these tracks:")
-    print(f"  within half a beat of the beat grid: {pct(sum(r['on beat grid'] for _, r in done), cues)}")
+    print(f"  within {ON_BEAT:g} beat of the beat grid: {pct(sum(r['on beat grid'] for _, r in done), cues)}")
     print(f"  within a beat of the 8-bar phrase grid: {pct(sum(r['on phrase grid'] for _, r in done), cues)}")
     print(f"\n{'Rule':<16}{'cues hit within 1 beat':>24}{'within 1 bar':>14}")
     for rule in RULES:

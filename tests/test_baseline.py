@@ -55,6 +55,14 @@ class Synthetic(unittest.TestCase):
         self.assertLess(abs(g["beats"][0] - START), 0.05)
         for want in (bar(16), bar(48)):
             self.assertLess(min(abs(t - want) for t in g["start + top 3"]), BEAT / 2)
+        # the only rise is at bar 16, so that's a drop, with its build cue 8 bars before
+        for want in (bar(8), bar(16)):
+            self.assertLess(min(abs(t - want) for t in g["2 drops"]), BEAT / 2)
+
+    def test_drops_stay_apart(self):
+        r = np.zeros(200)
+        r[[100, 101, 140, 30]] = [5, 4.9, 4, 3]
+        self.assertEqual(baseline.drops(r), [100, 30])
 
     def test_end_to_end_on_a_test_db(self):
         dbfile = self.tmp / "mixxxdb.sqlite"
@@ -71,7 +79,7 @@ class Synthetic(unittest.TestCase):
             self.assertEqual(baseline.main(["--db", str(dbfile), "-j", "1"]), 0)
         text = out.getvalue()
         self.assertIn("1 marked tracks", text)
-        self.assertIn("within half a beat of the beat grid: 100%", text)
+        self.assertIn("within 0.1 beat of the beat grid: 100%", text)
         self.assertRegex(text, r"start \+ top 3\s+(75|100)%")
 
     def test_refuses_the_live_db(self):
