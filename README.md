@@ -40,14 +40,16 @@ Learns which rises in a track you cue as drops. Candidates are the beats where l
 bass rise most within 2 bars either side, plus every 8-bar phrase start (the phrase phase is the
 one where the 1-bar change adds up highest). Each gets a few features (how big the rise is over 1
 and 8 bars, compared with the track's biggest, where it sits in the track, loudness before and
-after, fit to the phrase grid, whether there's another big rise 16-32 bars away). A
+after, fit to the phrase grid, whether there's another big rise 16-32 bars away; and from a
+mel spectrogram and chroma, novelty, timbre change and harmony change across it). A
 gradient-boosting model (scikit-learn) scores them. The guess is the 2 best candidates 16+ bars
 apart, each with a cue 8 bars before it.
 
 It's scored with 5-fold cross-validation by track, repeated over 5 different splits, so every
 track is guessed by a model that never saw it, next to the baseline's "2 drops" rule. On the
-library (about 430 tracks, 2026-11-13): **54%** of hot cues within a beat (62% within a bar),
-against 42% (52%) for the rule. About 82% of drop cues sit within a beat of a candidate.
+library (about 400-430 tracks, 2026-11-14): **55-56%** of hot cues within a beat (64% within a
+bar), against 42% (52%) for the rule. About 81% of drop cues sit within a beat of a candidate.
+Analysis reads each file twice (once for loudness and bass, once for the mel spectrogram).
 
 Tried and not kept (same tracks, averaged over splits):
 - Mixxx's own beatgrid (decoded from the `beats` blob): 94% of cues sit on it against 83% on
@@ -55,6 +57,10 @@ Tried and not kept (same tracks, averaged over splits):
 - Every beat as a candidate; picking the best-scoring pair of drops; stricter labels; wider
   drop spacing; bigger or smaller models: all the same or worse.
 - Mid and high frequency bands as features: +0.4 points, within the noise between splits.
+- Spectrogram models (2026-11-14): an MLP on a 16-bar mel patch around each candidate (46% alone),
+  a small CNN on the same patch (51% alone; 54.7% blended 50/50 with gradient boosting), and the
+  MLP's score as an extra feature (no gain). How alike the sections after two candidates sound
+  (repetition) didn't help either.
 - Each feature compared with the rest of its track, features of the build 8 bars earlier, and
   weighting every track equally in training: all within ±0.7 points of the shipped version.
 

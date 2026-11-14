@@ -10,7 +10,8 @@ Reads only: a copy of mixxxdb.sqlite and your audio files. Writes nothing.
 2. Labels: a candidate is a drop if it's within a beat of one of your cues that has another of
    your cues 8 bars before it (your A, A+8 bars pattern); on tracks without that pattern, any cue.
 3. Model: gradient boosting on a few features per candidate (rise sizes, place in the track,
-   loudness after vs. before, fit to the track's phrase grid, a big rise 16-32 bars away).
+   loudness after vs. before, fit to the track's phrase grid, a big rise 16-32 bars away), and
+   from a mel spectrogram and chroma: novelty, timbre change and harmony change across it.
 4. Guess: the 2 top-scored candidates 16+ bars apart, each with a cue 8 bars before it.
 Scored with 5-fold cross-validation by track, averaged over 5 different splits (one split
 alone moves the score by up to 2 points), against the "2 drops" rule on the same tracks.
@@ -22,6 +23,7 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 from sklearn.ensemble import HistGradientBoostingClassifier
 
 from mixxx_cue_guess import baseline as b
@@ -32,10 +34,78 @@ SPLITS = 5  # cross-validation repeats, each with a different split
 FEATURES = ("8-bar rise", "1-bar rise", "rise vs. track's biggest", "place in track", "bars from start",
             "loudness after", "bass after", "loudness before", "on the phrase grid",
             "rise rank in track", "1-bar peak", "big rise 16-32 bars away", "bass before",
-            "beats from the grid's phrase start", "1-bar change")
+            "beats from the grid's phrase start", "1-bar change",
+            "novelty over 8 bars", "novelty over 2 bars",
+            *(f"timbre {w}: {n}" for w in ("8 bars", "1 bar") for n in ("change", "low", "low-mid", "mid", "high-mid", "high")),
+            "brightness after", "harmony change over 8 bars", "harmony change over 1 bar")
+SPEC_N, SPEC_HOP, MELS = 2048, 1024, 40  # finer FFT than baseline.envelopes: mel and chroma need the resolution
 
 
-def candidates(total, bass, fps: float, bpm: float):
+def banks(sr: int) -> tuple[np.ndarray, np.ndarray]:
+    """Mel (40 triangles, 30 Hz-16 kHz) and chroma (12 pitch classes, 60 Hz-4 kHz) filters over FFT bins."""
+    hz = np.fft.rfftfreq(SPEC_N, 1 / sr)
+    mel = lambda f: 2595 * np.log10(1 + f / 700)  # noqa: E731
+    edges = 700 * (10 ** (np.linspace(mel(30), mel(min(16000, sr / 2)), MELS + 2) / 2595) - 1)
+    fbm = np.array([np.clip(np.minimum((hz - lo) / (c - lo), (hi - hz) / (hi - c)), 0, None)
+                    for lo, c, hi in zip(edges, edges[1:], edges[2:])])
+    fbc = np.zeros((12, len(hz)))
+    ok = (hz > 60) & (hz < 4000)
+    fbc[np.round(12 * np.log2(hz[ok] / 440) + 69).astype(int) % 12, np.flatnonzero(ok)] = 1
+    return fbm, fbc
+
+
+def spectra(path: str) -> tuple[np.ndarray, np.ndarray]:
+    """Per SPEC_HOP frame: log mel energies, and chroma as shares of the frame's pitched energy.
+
+    shortcut: decodes the file a second time after baseline.envelopes; merge the two passes if analysis time matters.
+    """
+    sr = sf.info(path).samplerate
+    fbm, fbc = banks(sr)
+    win = np.hanning(SPEC_N).astype(np.float32)
+    mel, chroma = [], []
+    for block in sf.blocks(path, blocksize=SPEC_HOP * 2048, overlap=SPEC_N - SPEC_HOP, dtype="float32", always_2d=True):
+        x = block.mean(axis=1)
+        if len(x) < SPEC_N:
+            break
+        p = np.abs(np.fft.rfft(np.lib.stride_tricks.sliding_window_view(x, SPEC_N)[::SPEC_HOP] * win, axis=1)) ** 2
+        mel.append(p @ fbm.T)
+        chroma.append(p @ fbc.T)
+    mel, chroma = np.concatenate(mel), np.concatenate(chroma)
+    return np.log(mel + b.EPS), chroma / (chroma.sum(axis=1, keepdims=True) + b.EPS)
+
+
+def per_beat(frames: np.ndarray, beats: np.ndarray) -> np.ndarray:
+    """Mean of SPEC_HOP frames over each beat; `beats` is in baseline.HOP frames."""
+    edges = np.r_[beats, beats[-1] + np.median(np.diff(beats))] * b.HOP / SPEC_HOP
+    edges = np.clip(np.round(edges).astype(int), 0, len(frames))
+    c = np.concatenate([np.zeros((1, frames.shape[1])), np.cumsum(frames, axis=0)])
+    return (c[edges[1:]] - c[edges[:-1]]) / np.maximum(edges[1:] - edges[:-1], 1)[:, None]
+
+
+def spectral(mel: np.ndarray, chroma: np.ndarray, idx: np.ndarray) -> np.ndarray:
+    """Per candidate: novelty, timbre change and harmony change across it (each +0.5-1.2 points, 2026-11-14)."""
+    Z = (mel - mel.mean(axis=0)) / (mel.std(axis=0) + 1e-6)  # each band against its own track
+    U = Z / (np.linalg.norm(Z, axis=1, keepdims=True) + 1e-9)
+    span = lambda A, a, c: A[max(a, 0):min(c, len(A))].mean(axis=0) if min(c, len(A)) > max(a, 0) else np.zeros(A.shape[1])  # noqa: E731
+    cos = lambda u, v: float(u @ v / (np.linalg.norm(u) * np.linalg.norm(v) + 1e-9))  # noqa: E731
+
+    def novelty(i, w):  # Foote: similar within each side, unlike across
+        A, B = U[max(i - w, 0):i], U[i:i + w]
+        return float((A @ A.T).mean() + (B @ B.T).mean() - 2 * (A @ B.T).mean()) if len(A) and len(B) else 0.0
+
+    rows = []
+    for i in idx:
+        row = [novelty(i, b.PHRASE), novelty(i, 8)]
+        for w in (b.PHRASE, 4):
+            d = span(Z, i, i + w) - span(Z, i - w, i)
+            row += [np.linalg.norm(d)] + [d[k:k + 8].mean() for k in range(0, MELS, 8)]
+        row.append(span(Z, i, i + b.PHRASE)[24:].mean())
+        row += [1 - cos(span(chroma, i - w, i), span(chroma, i, i + w)) for w in (b.PHRASE, 4)]
+        rows.append(row)
+    return np.array(rows).reshape(len(idx), -1)
+
+
+def candidates(total, bass, fps: float, bpm: float, mel: np.ndarray, chroma: np.ndarray):
     """Beat frames, candidate beat indices, and one feature row per candidate.
 
     Candidates: the peaks of the 1-bar rise, plus every 8-bar phrase start. The phrase phase is the
@@ -59,10 +129,11 @@ def candidates(total, bass, fps: float, bpm: float):
     away = [idx + k for k in (-128, -96, -64, 64, 96, 128)]  # 16, 24, 32 bars: where the other drop tends to be
     partner = np.max([np.where((j >= 0) & (j < len(long)), np.nan_to_num(long[j.clip(0, len(long) - 1)], neginf=-5), 0)
                       for j in away], axis=0)
+    spec = spectral(per_beat(mel, beats), per_beat(chroma, beats), idx)
     X = np.column_stack([long[idx], short[idx], long[idx] / max(long[idx].max(), b.EPS), idx / len(beats),
                          idx / 4 / 100, after(total), after(bass), before(total), 1 - np.minimum(off, b.PHRASE - off) / 16,
                          np.argsort(np.argsort(-long[idx])) / len(idx), np.isin(idx, peaks), partner, before(bass),
-                         np.minimum(idx % b.PHRASE, b.PHRASE - idx % b.PHRASE), ch[idx]])
+                         np.minimum(idx % b.PHRASE, b.PHRASE - idx % b.PHRASE), ch[idx], spec])
     ok = np.isfinite(X).all(axis=1)  # windows past the track's end
     return beats, idx[ok], X[ok]
 
@@ -79,7 +150,11 @@ def prepare(track: dict) -> dict:
     if isinstance(loaded, dict):
         return loaded
     total, bass, fps = loaded
-    beats, idx, X = candidates(total, bass, fps, track["bpm"])
+    try:
+        mel, chroma = spectra(track["path"])
+    except Exception as e:
+        return {"skip": f"can't decode ({Path(track['path']).suffix or 'no extension'})", "error": str(e)}
+    beats, idx, X = candidates(total, bass, fps, track["bpm"], mel, chroma)
     beat = 60 / track["bpm"]
     times = beats[idx] / fps
     labels = drop_cues(track["cues"], beat)

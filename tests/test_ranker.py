@@ -20,7 +20,7 @@ class OnSynthetic(unittest.TestCase):
         wav = Path(tempfile.mkdtemp()) / "track.wav"
         synth(wav)
         total, bass, fps = baseline.envelopes(str(wav))
-        beats, idx, X = ranker.candidates(total, bass, fps, BPM)
+        beats, idx, X = ranker.candidates(total, bass, fps, BPM, *ranker.spectra(str(wav)))
         self.assertEqual(X.shape, (len(idx), len(ranker.FEATURES)))
         times = beats[idx] / fps
         y = (np.abs(times - bar(16)) <= BEAT).astype(float)
