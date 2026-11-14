@@ -6,13 +6,14 @@
 Reads only: a copy of mixxxdb.sqlite and your audio files. Writes nothing.
 
 1. Candidates: every beat where the 1-bar rise peaks within 2 bars either side (the point
-   the baseline's "2 drops" rule sharpens a drop to).
+   the baseline's "2 drops" rule sharpens a drop to), plus every 8-bar phrase start.
 2. Labels: a candidate is a drop if it's within a beat of one of your cues that has another of
    your cues 8 bars before it (your A, A+8 bars pattern); on tracks without that pattern, any cue.
 3. Model: gradient boosting on a few features per candidate (rise sizes, place in the track,
-   loudness after vs. before, fit to the track's phrase grid).
+   loudness after vs. before, fit to the track's phrase grid, a big rise 16-32 bars away).
 4. Guess: the 2 top-scored candidates 16+ bars apart, each with a cue 8 bars before it.
-Scored with 5-fold cross-validation by track, against the "2 drops" rule on the same tracks.
+Scored with 5-fold cross-validation by track, averaged over 5 different splits (one split
+alone moves the score by up to 2 points), against the "2 drops" rule on the same tracks.
 """
 import argparse
 import sys
@@ -27,26 +28,41 @@ from mixxx_cue_guess import baseline as b
 from mixxx_harness import db, host
 
 FOLDS = 5
+SPLITS = 5  # cross-validation repeats, each with a different split
 FEATURES = ("8-bar rise", "1-bar rise", "rise vs. track's biggest", "place in track", "bars from start",
-            "loudness after", "bass after", "loudness before", "on the phrase grid")
+            "loudness after", "bass after", "loudness before", "on the phrase grid",
+            "rise rank in track", "1-bar peak", "big rise 16-32 bars away", "bass before",
+            "beats from the grid's phrase start", "1-bar change")
 
 
 def candidates(total, bass, fps: float, bpm: float):
-    """Beat frames, candidate beat indices, and one feature row per candidate."""
+    """Beat frames, candidate beat indices, and one feature row per candidate.
+
+    Candidates: the peaks of the 1-bar rise, plus every 8-bar phrase start. The phrase phase is the
+    one where the 1-bar change adds up highest (right within a beat on 79% of tracks, 2026-11-13).
+    """
     period = fps * 60 / bpm
     beats = b.beat_frames(bass, period)
     width = int(round(period * b.PHRASE))
     long = b.rise(total, bass, beats, width)
     short = b.rise(total, bass, beats, int(round(period * 4)))
-    idx = np.array([i for i in range(len(beats)) if np.isfinite(long[i]) and b.sharpen(short, i) == i], dtype=int)
+    ch = np.nan_to_num(b.change(total, bass, beats, int(round(period * 4))))
+    ok = np.flatnonzero(np.isfinite(long) & np.isfinite(short))
+    peaks = [i for i in ok if b.sharpen(short, i) == i]
+    phase = max(range(b.PHRASE), key=lambda p: ch[p::b.PHRASE].sum())
+    idx = np.array(sorted(set(peaks) | {i for i in ok if i % b.PHRASE == phase}), dtype=int)
     if not len(idx):
         return beats, idx, np.zeros((0, len(FEATURES)))
     after = lambda v: b.window_mean(v, beats[idx], beats[idx] + width) - np.median(v)  # noqa: E731
-    before = b.window_mean(total, beats[idx] - width, beats[idx]) - np.median(total)
-    top = idx[np.argmax(long[idx])]
-    off = (idx - top) % b.PHRASE
+    before = lambda v: b.window_mean(v, beats[idx] - width, beats[idx]) - np.median(v)  # noqa: E731
+    off = (idx - phase) % b.PHRASE
+    away = [idx + k for k in (-128, -96, -64, 64, 96, 128)]  # 16, 24, 32 bars: where the other drop tends to be
+    partner = np.max([np.where((j >= 0) & (j < len(long)), np.nan_to_num(long[j.clip(0, len(long) - 1)], neginf=-5), 0)
+                      for j in away], axis=0)
     X = np.column_stack([long[idx], short[idx], long[idx] / max(long[idx].max(), b.EPS), idx / len(beats),
-                         idx / 4 / 100, after(total), after(bass), before, 1 - np.minimum(off, b.PHRASE - off) / 16])
+                         idx / 4 / 100, after(total), after(bass), before(total), 1 - np.minimum(off, b.PHRASE - off) / 16,
+                         np.argsort(np.argsort(-long[idx])) / len(idx), np.isin(idx, peaks), partner, before(bass),
+                         np.minimum(idx % b.PHRASE, b.PHRASE - idx % b.PHRASE), ch[idx]])
     ok = np.isfinite(X).all(axis=1)  # windows past the track's end
     return beats, idx[ok], X[ok]
 
@@ -116,21 +132,22 @@ def main(argv=None) -> int:
         print(f"Need at least {FOLDS} analyzed tracks to cross-validate")
         return 1
 
-    fold = np.random.default_rng(0).permutation(len(done)) % FOLDS
     hits = {"ranker": [0, 0], "2 drops rule": [0, 0]}
-    for k in range(FOLDS):
-        train = [t for t, f in zip(done, fold) if f != k and len(t["y"])]
-        model = fit(np.vstack([t["X"] for t in train]), np.concatenate([t["y"] for t in train]))
-        for t in (t for t, f in zip(done, fold) if f == k):
-            for name, g in (("ranker", pick(t, score(model, t["X"])) if len(t["y"]) else []), ("2 drops rule", t["rule"])):
-                hits[name][0] += b.matched(g, t["cues"], t["beat"])
-                hits[name][1] += b.matched(g, t["cues"], 4 * t["beat"])
+    for seed in range(SPLITS):
+        fold = np.random.default_rng(seed).permutation(len(done)) % FOLDS
+        for k in range(FOLDS):
+            train = [t for t, f in zip(done, fold) if f != k and len(t["y"])]
+            model = fit(np.vstack([t["X"] for t in train]), np.concatenate([t["y"] for t in train]))
+            for t in (t for t, f in zip(done, fold) if f == k):
+                for name, g in (("ranker", pick(t, score(model, t["X"])) if len(t["y"]) else []), ("2 drops rule", t["rule"])):
+                    hits[name][0] += b.matched(g, t["cues"], t["beat"]) / SPLITS
+                    hits[name][1] += b.matched(g, t["cues"], 4 * t["beat"]) / SPLITS
 
     cues = sum(len(t["cues"]) for t in done)
     drops = sum(t["drops"] for t in done)
     print(f"\nYour {cues} hot cues; {drops} of them count as drops (a cue 8 bars before them)")
     print(f"  drops within a beat of a candidate (the most any ranker can find): {b.pct(sum(t['reachable'] for t in done), drops)}")
-    print(f"\n{'Guesses (' + str(FOLDS) + '-fold, by track)':<30}{'cues hit within 1 beat':>24}{'within 1 bar':>14}")
+    print(f"\n{f'Guesses ({FOLDS}-fold x{SPLITS}, by track)':<30}{'cues hit within 1 beat':>24}{'within 1 bar':>14}")
     for name, (beat, bar) in hits.items():
         print(f"{name:<30}{b.pct(beat, cues):>24}{b.pct(bar, cues):>14}")
     return 0

@@ -37,16 +37,24 @@ uv run python -m mixxx_cue_guess.ranker             # same --db / --limit / -j o
 ```
 
 Learns which rises in a track you cue as drops. Candidates are the beats where loudness and
-bass rise most within 2 bars either side. Each gets a few features (how big the rise is over 1
+bass rise most within 2 bars either side, plus every 8-bar phrase start (the phrase phase is the
+one where the 1-bar change adds up highest). Each gets a few features (how big the rise is over 1
 and 8 bars, compared with the track's biggest, where it sits in the track, loudness before and
-after, fit to the phrase grid). A gradient-boosting model (scikit-learn) scores them. The guess
-is the 2 best candidates 16+ bars apart, each with a cue 8 bars before it.
+after, fit to the phrase grid, whether there's another big rise 16-32 bars away). A
+gradient-boosting model (scikit-learn) scores them. The guess is the 2 best candidates 16+ bars
+apart, each with a cue 8 bars before it.
 
-It's scored with 5-fold cross-validation by track, so every track is guessed by a model that
-never saw it, next to the baseline's "2 drops" rule. On the first full library (433 tracks,
-2026-11-13): **49-50%** of hot cues within a beat (60% within a bar), against 42% (52%) for the rule.
-What limits it: only about 64% of drop cues sit within a beat of a candidate, and about 20%
-are off this beat grid (Mixxx's own beatgrid isn't read yet).
+It's scored with 5-fold cross-validation by track, repeated over 5 different splits, so every
+track is guessed by a model that never saw it, next to the baseline's "2 drops" rule. On the
+library (about 430 tracks, 2026-11-13): **54%** of hot cues within a beat (62% within a bar),
+against 42% (52%) for the rule. About 82% of drop cues sit within a beat of a candidate.
+
+Tried and not kept (same tracks, averaged over splits):
+- Mixxx's own beatgrid (decoded from the `beats` blob): 94% of cues sit on it against 83% on
+  this script's grid, but the score didn't move.
+- Every beat as a candidate; picking the best-scoring pair of drops; stricter labels; wider
+  drop spacing; bigger or smaller models: all the same or worse.
+- Mid and high frequency bands as features: +0.4 points, within the noise between splits.
 
 It writes nothing and saves no model yet; that comes with writing cues into Mixxx.
 
