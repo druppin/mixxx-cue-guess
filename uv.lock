@@ -148,7 +148,7 @@ requires-dist = [
 [[package]]
 name = "mixxx-harness"
 version = "0.1.0"
-source = { git = "https://github.com/druppin/mixxx-harness?branch=main#e70bc1f454f38809b8de3a68c04ca162dd5fa9f9" }
+source = { git = "https://github.com/druppin/mixxx-harness?branch=main#515d04974ecb2deac601dc06fbb8e017c5496333" }
 
 [[package]]
 name = "narwhals"

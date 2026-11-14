@@ -3,9 +3,30 @@
 A [mixxx-harness](https://github.com/druppin/mixxx-harness) mod that guesses where you'd put
 hot cues, based on the hot cues you've already set.
 
-Status: **baseline check and a trained ranker, both report-only.** The mod writes nothing yet. Writing cues into Mixxx needs a
-spike first (which `type` and `color` a new cue needs, and whether Mixxx keeps cues written
-from outside).
+Status: **writes guessed hot cues for you to review** (2026-11-14).
+
+## Guessed cues, and approving them
+
+1. `uv run python -m mixxx_cue_guess.guess` trains the ranker (below) on your marked tracks and
+   guesses 4 hot cues for every track with none: 2 drops, each with a cue 8 bars before it,
+   on pads 1-4 in time order. It reads a copy of the database and your audio, and writes only
+   `<harness state_dir>/cue-guess/guesses.json`. Options: `--limit N`, `-j N` (default 3), `--db`.
+2. At the next harness launch (Mixxx closed), the mod writes them into Mixxx: hot cues colored
+   **blue** (`0x0044FF`) and labelled `guess`, and the track goes into the crate **Cues: review**.
+   A track that has any hot cues is never written to, nor is one whose file changed since the
+   guess.
+3. Check the cues in Mixxx and fix any that are wrong. Then **remove the track from Cues:
+   review**: that's the approval. At the next launch the mod turns its `guess` cues orange
+   (`0xFF8000`, your usual color) and clears the label, so blue on a deck always means "not
+   checked yet".
+4. Don't want them? Delete the cues. The mod lists every track it wrote to
+   (`cue-guess/written.json`) and never guesses one twice.
+
+cratesync should treat tracks in Cues: review as not marked (add the crate to the bridge's
+ignore list). The mod claims `Owns(crates={"Cues: review"}, new_cues=True)` in mixxx-harness:
+it can add hot cues only to tracks with none, and change cue colors and labels, never positions.
+For the harness to run it, install this package in the environment that runs
+`python -m mixxx_harness launch`.
 
 ## Baseline check
 
