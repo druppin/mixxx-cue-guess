@@ -55,6 +55,8 @@ Tried and not kept (same tracks, averaged over splits):
 - Every beat as a candidate; picking the best-scoring pair of drops; stricter labels; wider
   drop spacing; bigger or smaller models: all the same or worse.
 - Mid and high frequency bands as features: +0.4 points, within the noise between splits.
+- Each feature compared with the rest of its track, features of the build 8 bars earlier, and
+  weighting every track equally in training: all within ±0.7 points of the shipped version.
 
 It writes nothing and saves no model yet; that comes with writing cues into Mixxx.
 
