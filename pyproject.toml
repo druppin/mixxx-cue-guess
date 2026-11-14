@@ -1,0 +1,19 @@
+[project]
+name = "mixxx-cue-guess"
+version = "0.1.0"
+description = "A mixxx-harness mod that guesses where you'd put hot cues, from the ones you've already set"
+requires-python = ">=3.11"
+dependencies = ["mixxx-harness", "numpy>=1.26", "soundfile>=0.12"]
+
+[project.entry-points."mixxx_harness.mods"]
+cue-guess = "mixxx_cue_guess:mod"
+
+[tool.uv.sources]
+mixxx-harness = { git = "https://github.com/druppin/mixxx-harness", branch = "main" }
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["mixxx_cue_guess"]
