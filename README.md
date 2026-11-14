@@ -19,6 +19,10 @@ Status: **writes guessed hot cues for you to review** (2026-11-14).
    review**: that's the approval. At the next launch the mod turns its `guess` cues orange
    (`0xFF8000`, your usual color) and clears the label, so blue on a deck always means "not
    checked yet".
+The harness dashboard (`python -m mixxx_harness dashboard`) has a **cue-guess** tab: how many
+tracks are guessed, in review, approved and still to analyse; the tracks in Cues: review; and a
+**Guess cues** button that runs step 1 (with an optional batch size) and shows its output.
+
 4. Don't want them? Delete the cues. The mod lists every track it wrote to
    (`cue-guess/written.json`) and never guesses one twice.
 

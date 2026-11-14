@@ -72,6 +72,21 @@ class Mod(unittest.TestCase):
         self.run_mod()
         self.assertEqual(self.cues(2), [])
 
+    def test_status_counts_each_stage(self):
+        from mixxx_cue_guess import status
+        con = db.connect(self.db)
+        st = status(con, self.state)
+        self.assertEqual((st["waiting"], st["in review"], st["done (left the crate)"]), (1, 0, 0))  # track 2 only
+        self.run_mod()
+        st = status(db.connect(self.db), self.state)
+        self.assertEqual((st["waiting"], st["in review"], st["review list"][0][0]), (0, 1, 2))
+        con = db.connect(self.db, write=True)
+        db.remove_from_crate(con, REVIEW_CRATE, 2)
+        con.commit()
+        st = status(db.connect(self.db), self.state)
+        self.assertEqual((st["in review"], st["approved, not recolored yet"], st["done (left the crate)"]), (0, 1, 1))
+        self.assertEqual(st["need analysis in Mixxx first"], 1)  # track 3: no cues, no BPM in the test db
+
     def test_dry_run_writes_nothing(self):
         before = self.db.read_bytes()
         done, warnings = self.run_mod(dry_run=True)

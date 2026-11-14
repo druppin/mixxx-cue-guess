@@ -46,6 +46,40 @@ def write_json(path: Path, data) -> None:
     os.replace(tmp, path)
 
 
+def writable(con, guesses: dict, written: set[int]) -> list[tuple[int, list[tuple[float, int, str]]]]:
+    """The guesses the mod would write now, as (track id, [(position, color, label)])."""
+    counts = db.hot_cue_counts(con)
+    out = []
+    for key, g in guesses.items():
+        tid = int(key)
+        if tid in written or counts.get(tid, 1) or db.track_path(con, tid) != g["path"]:
+            continue  # done before, has cues now (or is gone), or the row points at another file
+        rate, channels = db.audio_format(con, tid)
+        if rate and channels:  # positions count samples across all channels (cratesync findings, spike 1)
+            out.append((tid, [(s * rate * channels, GUESS_COLOR, GUESS_LABEL) for s in g["seconds"]]))
+    return out
+
+
+def status(con, folder: Path) -> dict:
+    """Where every track stands, for the dashboard page. Reads only."""
+    guesses = read_json(folder / "guesses.json", {})
+    written = set(read_json(folder / "written.json", []))
+    counts = db.hot_cue_counts(con)
+    review = db.crate_members(con, REVIEW_CRATE)
+    bpm = dict(con.execute("SELECT id, bpm FROM library WHERE mixxx_deleted = 0"))
+    uncued = [t for t, n in counts.items() if not n and t not in written]
+    return {
+        "waiting": len(writable(con, guesses, written)),
+        "in review": len(review),
+        "approved, not recolored yet": len({t for (t,) in con.execute(
+            "SELECT DISTINCT track_id FROM cues WHERE hotcue >= 0 AND label = ?", (GUESS_LABEL,))} - set(review)),
+        "done (left the crate)": len(written - set(review)),
+        "to guess": sum(1 for t in uncued if (bpm.get(t) or 0) > 0 and str(t) not in guesses),
+        "need analysis in Mixxx first": sum(1 for t in uncued if not (bpm.get(t) or 0) > 0),
+        "review list": sorted(review.items()),
+    }
+
+
 class CueGuess:
     name, version = "cue-guess", "0.2.0"
     owns = Owns(crates=frozenset({REVIEW_CRATE}), new_cues=True)
@@ -61,15 +95,7 @@ class CueGuess:
         review = set(db.crate_members(con, REVIEW_CRATE))
         approved = [cue for cue, tid in con.execute(
             "SELECT id, track_id FROM cues WHERE hotcue >= 0 AND label = ?", (GUESS_LABEL,)) if tid not in review]
-        counts = db.hot_cue_counts(con)
-        new = []
-        for key, g in guesses.items():
-            tid = int(key)
-            if tid in written or counts.get(tid, 1) or db.track_path(con, tid) != g["path"]:
-                continue  # done before, has cues now (or is gone), or the row points at another file
-            rate, channels = db.audio_format(con, tid)
-            if rate and channels:  # positions count samples across all channels (cratesync findings, spike 1)
-                new.append((tid, [(s * rate * channels, GUESS_COLOR, GUESS_LABEL) for s in g["seconds"]]))
+        new = writable(con, guesses, written)
         if not approved and not new:
             return
         with ctx.write():
@@ -80,6 +106,11 @@ class CueGuess:
                 ctx.add_to_crate(REVIEW_CRATE, tid)
         if not ctx.dry_run:
             write_json(folder / "written.json", sorted(written | {tid for tid, _ in new}))
+
+    def page(self):
+        from mixxx_harness.host import load_config
+        from mixxx_cue_guess.page import Page  # PySide6 only when the dashboard opens
+        return Page(load_config().mixxx_db, self._folder or state_folder())
 
 
 mod = CueGuess()
