@@ -3,7 +3,7 @@
 A [mixxx-harness](https://github.com/druppin/mixxx-harness) mod that guesses where you'd put
 hot cues, based on the hot cues you've already set.
 
-Status: **baseline check only.** The mod writes nothing yet. Writing cues into Mixxx needs a
+Status: **baseline check and a trained ranker, both report-only.** The mod writes nothing yet. Writing cues into Mixxx needs a
 spike first (which `type` and `color` a new cue needs, and whether Mixxx keeps cues written
 from outside).
 
@@ -29,6 +29,26 @@ a bar. A trained model has to beat these numbers to be worth building.
 
 Audio goes through libsndfile (WAV, FLAC, MP3, OGG). Other formats, such as M4A, are skipped
 and counted.
+
+## Trained ranker
+
+```
+uv run python -m mixxx_cue_guess.ranker             # same --db / --limit / -j options
+```
+
+Learns which rises in a track you cue as drops. Candidates are the beats where loudness and
+bass rise most within 2 bars either side. Each gets a few features (how big the rise is over 1
+and 8 bars, compared with the track's biggest, where it sits in the track, loudness before and
+after, fit to the phrase grid). A gradient-boosting model (scikit-learn) scores them. The guess
+is the 2 best candidates 16+ bars apart, each with a cue 8 bars before it.
+
+It's scored with 5-fold cross-validation by track, so every track is guessed by a model that
+never saw it, next to the baseline's "2 drops" rule. On the first full library (433 tracks,
+2026-11-13): **49-50%** of hot cues within a beat (60% within a bar), against 42% (52%) for the rule.
+What limits it: only about 64% of drop cues sit within a beat of a candidate, and about 20%
+are off this beat grid (Mixxx's own beatgrid isn't read yet).
+
+It writes nothing and saves no model yet; that comes with writing cues into Mixxx.
 
 ## Tests
 

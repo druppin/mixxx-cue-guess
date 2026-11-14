@@ -98,7 +98,7 @@ def rise(total: np.ndarray, bass: np.ndarray, beats: np.ndarray, width: int) -> 
     for v in (total, bass):
         out += window_mean(v, beats, beats + width) - window_mean(v, beats - width, beats)
     out[(beats < width) | (beats + width > len(total))] = -np.inf
-    return np.nan_to_num(out, nan=-np.inf)
+    return np.where(np.isnan(out), -np.inf, out)
 
 
 def sharpen(r: np.ndarray, d: int, reach: int = 8) -> int:
@@ -153,8 +153,8 @@ def near(points: np.ndarray, cues, tol: float) -> int:
     return sum(bool(len(points)) and float(np.min(np.abs(points - c))) <= tol for c in cues)
 
 
-def analyze(track: dict) -> dict:
-    """One track's result, or {"skip": reason}. Runs in a worker process."""
+def load(track: dict):
+    """(total, bass, fps), or {"skip": reason} if the track can't be analyzed."""
     if not track["path"]:
         return {"skip": "no file path"}
     if not track["bpm"] or track["bpm"] <= 0:
@@ -164,9 +164,17 @@ def analyze(track: dict) -> dict:
     if not Path(track["path"]).is_file():
         return {"skip": "file not found"}
     try:
-        total, bass, fps = envelopes(track["path"])
+        return envelopes(track["path"])
     except Exception as e:  # e.g. a format libsndfile can't read
         return {"skip": f"can't decode ({Path(track['path']).suffix or 'no extension'})", "error": str(e)}
+
+
+def analyze(track: dict) -> dict:
+    """One track's result, or {"skip": reason}. Runs in a worker process."""
+    loaded = load(track)
+    if isinstance(loaded, dict):
+        return loaded
+    total, bass, fps = loaded
     g = guess(total, bass, fps, track["bpm"])
     beat, cues = 60 / track["bpm"], track["cues"]
     out = {"cues": len(cues), "on beat grid": near(g["beats"], cues, beat * ON_BEAT),
