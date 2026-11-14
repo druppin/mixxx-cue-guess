@@ -12,6 +12,8 @@ For each marked track (4+ hot cues) with a BPM in Mixxx:
 4. Rules: "top 4" (the 4 biggest changes), "start + top 3" (first beat, then the 3 biggest),
    and "2 drops" (the 2 biggest rises in loudness and bass, each with a cue 8 bars before it:
    the pattern in the first run, 2026-11-13, where 17 of 19 tracks had cues A, A+8 bars, B, B+8 bars).
+   Drops are found with 8-bar windows, moved to where a 1-bar window peaks (within 2 bars),
+   and never in the first 16 bars. On all 433 tracks: 42% of cues within a beat, up from 14%.
 It then counts how many of your cues a guess lands near, and how many of your cues sit
 on the beat grid and on the phrase grid at all (if those are low, a better picker can't help).
 """
@@ -32,6 +34,7 @@ PHRASE = 32  # beats: 8 bars of 4/4
 BASS_HZ = 150
 EPS = 1e-10
 RULES = ("top 4", "start + top 3", "2 drops")
+INTRO = 2 * PHRASE  # beats: no drop in the first 16 bars (the first run's earliest drop was ~20 bars in)
 ON_BEAT = 0.1  # of a beat: how close a cue must be to count as on the grid (~45 ms at 130 BPM)
 
 
@@ -89,11 +92,19 @@ def change(total: np.ndarray, bass: np.ndarray, beats: np.ndarray, width: int) -
 
 
 def rise(total: np.ndarray, bass: np.ndarray, beats: np.ndarray, width: int) -> np.ndarray:
-    """At each beat: after - before, like change() but signed, so a drop scores high and an outro low."""
+    """At each beat: after - before, like change() but signed, so a drop scores high and an outro low.
+    Beats without a full window on both sides score -inf: else the silence before the first beat reads as a drop."""
     out = np.zeros(len(beats))
     for v in (total, bass):
-        out += np.nan_to_num(window_mean(v, beats, beats + width) - window_mean(v, beats - width, beats))
-    return out
+        out += window_mean(v, beats, beats + width) - window_mean(v, beats - width, beats)
+    out[(beats < width) | (beats + width > len(total))] = -np.inf
+    return np.nan_to_num(out, nan=-np.inf)
+
+
+def sharpen(r: np.ndarray, d: int, reach: int = 8) -> int:
+    """The beat within `reach` of d where the short-window rise r peaks: the 8-bar window finds the drop, but blurs it by a bar or two."""
+    lo = max(d - reach, 0)
+    return lo + int(np.argmax(r[lo:d + reach + 1]))
 
 
 def drops(r: np.ndarray, n: int = 2, apart: int = 2 * PHRASE) -> list[int]:
@@ -115,7 +126,10 @@ def guess(total, bass, fps: float, bpm: float) -> dict:
     phrase = np.arange(offset, len(beats), PHRASE)
     top = phrase[np.argsort(-score[phrase], kind="stable")]
     seconds = lambda idx: sorted(float(beats[i] / fps) for i in idx)  # noqa: E731
-    found = drops(rise(total, bass, beats, int(round(period * PHRASE))))
+    short = rise(total, bass, beats, int(round(period * 4)))
+    long = rise(total, bass, beats, int(round(period * PHRASE)))
+    long[:INTRO] = -np.inf  # the kick coming in after the intro rises too, but you cue drops, not intros
+    found = [sharpen(short, d) for d in drops(long)]
     return {
         "beats": beats / fps,
         "phrase": beats[phrase] / fps,
