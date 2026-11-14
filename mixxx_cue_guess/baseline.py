@@ -39,10 +39,13 @@ ON_BEAT = 0.1  # of a beat: how close a cue must be to count as on the grid (~45
 
 
 def marked_tracks(con) -> list[dict]:
-    """Marked tracks with their path, BPM and hot cue times in seconds."""
+    """Marked tracks with their path, BPM and hot cue times in seconds. Tracks with unapproved
+    guessed cues don't count: learning from them would teach the model its own guesses."""
+    from mixxx_cue_guess import GUESS_LABEL
+    guessed = {t for (t,) in con.execute("SELECT DISTINCT track_id FROM cues WHERE hotcue >= 0 AND label = ?", (GUESS_LABEL,))}
     out = []
     for tid, n in db.hot_cue_counts(con).items():
-        if n < MARKED:
+        if n < MARKED or tid in guessed:
             continue
         rate, channels = db.audio_format(con, tid)
         bpm = con.execute("SELECT bpm FROM library WHERE id = ?", (tid,)).fetchone()[0]

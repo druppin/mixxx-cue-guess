@@ -120,6 +120,16 @@ class Mod(unittest.TestCase):
         self.run_mod()
         self.assertEqual(self.markers(2)[0], (6, 1000, 0))
 
+    def test_unapproved_guesses_are_not_training_data(self):
+        from mixxx_cue_guess import baseline
+        self.run_mod()  # track 2 gets 4 guessed cues
+        self.assertEqual([t["id"] for t in baseline.marked_tracks(db.connect(self.db))], [1])
+        c = db.connect(self.db, write=True)
+        db.remove_from_crate(c, REVIEW_CRATE, 2)
+        c.commit()
+        self.run_mod()  # approved: labels cleared, so it's yours now
+        self.assertEqual([t["id"] for t in baseline.marked_tracks(db.connect(self.db))], [1, 2])
+
     def test_dry_run_writes_nothing(self):
         before = self.db.read_bytes()
         done, warnings = self.run_mod(dry_run=True)
